@@ -1,0 +1,22 @@
+body, html {
+    height: 100%;
+    margin: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.logo {
+    width: 100px;
+    height: auto;
+}
+
+.carousel-control-prev:hover,
+.carousel-control-next:hover {
+  opacity: 1; /* Changez l'opacité lors du survol */
+}
+  
+.carousel-control-prev,
+.carousel-control-next {
+  transition: opacity 0.3s, background-color 0.3s; /* Transition douce pour les changements */
+}
