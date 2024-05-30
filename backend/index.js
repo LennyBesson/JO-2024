@@ -5,6 +5,9 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const session = require('express-session');
+const crypto = require('crypto');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
 const app = express();
 app.use(bodyParser.json());
 
@@ -19,17 +22,29 @@ app.use(cors({
     }
     return callback(null, true);
   },
-  methods: 'GET,POST,DELETE,PUT', // Ajoute les méthodes ici
-  credentials: true // Autoriser les cookies de session
+  methods: 'GET,POST,DELETE,PUT',
+  credentials: true // Important pour permettre l'envoi des cookies
 }));
 
 // Configuration du middleware de session
 app.use(session({
-  secret: 'yourSecretKey', // Remplacez par une clé secrète unique
+  secret: 'yourSecretKey',
   resave: false,
-  saveUninitialized: true,
-  cookie: { secure: false } // Mettez à true si vous utilisez HTTPS
+  saveUninitialized: false,
+  cookie: {
+    secure: false, // Utiliser true si vous utilisez HTTPS
+    httpOnly: true,
+    maxAge: 24 * 60 * 60 * 1000 // 1 jour de durée de vie
+  }
 }));
+
+// Middleware pour vérifier l'authentification
+function checkAuth(req, res, next) {
+  if (!req.session.userId) {
+    return res.status(401).json({ message: 'User not authenticated' });
+  }
+  next();
+}
 
 // Configuration de la base de données MySQL
 const db = mysql.createConnection({
@@ -66,6 +81,10 @@ app.post('/api/register', (req, res) => {
   const { nom, prenom, mail, mdp } = req.body;
   console.log('Received data:', { nom, prenom, mail, mdp });
 
+  // Générer une clé secrète
+  const cle_secrete = crypto.randomBytes(16).toString('hex');
+  console.log('Generated secret key:', cle_secrete);
+
   // Chiffrer le mot de passe
   bcrypt.hash(mdp, 10, (err, hashedPassword) => {
     if (err) {
@@ -74,8 +93,8 @@ app.post('/api/register', (req, res) => {
       return;
     }
 
-    const sql = 'INSERT INTO users (nom, prenom, mail, mdp) VALUES (?, ?, ?, ?)';
-    db.query(sql, [nom, prenom, mail, hashedPassword], (err, results) => {
+    const sql = 'INSERT INTO users (nom, prenom, mail, mdp, cle_secrete) VALUES (?, ?, ?, ?, ?)';
+    db.query(sql, [nom, prenom, mail, hashedPassword, cle_secrete], (err, results) => {
       if (err) {
         console.error('Error inserting user:', err.stack);
         res.status(500).json({ message: 'Error inserting user' });
@@ -164,6 +183,7 @@ app.get('/api/product/:id', (req, res) => {
 // Route pour ajouter un produit au panier
 app.post('/api/cart', (req, res) => {
   const { user_id, produit_id, quantite } = req.body;
+  console.log('Adding to cart:', { user_id, produit_id, quantite });
   const sql = `
     INSERT INTO panier (user_id, produit_id, quantite) 
     VALUES (?, ?, ?)
@@ -209,6 +229,55 @@ app.delete('/api/cart/:id', (req, res) => {
       return;
     }
     res.status(200).send('Item removed from cart');
+  });
+});
+
+// Route pour créer une session de paiement
+app.post('/api/create-checkout-session', checkAuth, async (req, res) => {
+  const userId = req.session.userId;
+
+  console.log('Session:', req.session); // Log l'état de la session
+  console.log('Authenticated user ID:', userId);
+
+  // Récupérer les éléments du panier pour cet utilisateur
+  const sql = `
+    SELECT p.nom, p.prix, c.quantite
+    FROM panier c
+    JOIN produit p ON c.produit_id = p.id
+    WHERE c.user_id = ?
+  `;
+  db.query(sql, [userId], async (err, results) => {
+    if (err) {
+      console.error('Error fetching cart items:', err.stack);
+      return res.status(500).send('Error fetching cart items');
+    }
+
+    // Créer les éléments de ligne pour la session de paiement Stripe
+    const line_items = results.map(item => ({
+      price_data: {
+        currency: 'usd', // Change la devise si nécessaire
+        product_data: {
+          name: item.nom,
+        },
+        unit_amount: item.prix * 100, // Le montant doit être en cents
+      },
+      quantity: item.quantite,
+    }));
+
+    try {
+      const session = await stripe.checkout.sessions.create({
+        payment_method_types: ['card'],
+        line_items: line_items,
+        mode: 'payment',
+        success_url: 'http://localhost:8080/success.html', // URL de redirection après succès du paiement
+        cancel_url: 'http://localhost:8080/cancel.html', // URL de redirection après annulation du paiement
+      });
+
+      res.json({ id: session.id });
+    } catch (err) {
+      console.error('Error creating Stripe checkout session:', err);
+      res.status(500).send('Error creating Stripe checkout session');
+    }
   });
 });
 
